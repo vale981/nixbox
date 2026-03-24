@@ -530,7 +530,7 @@ do_ssh() {
         exec ssh -t "${SSH_OPTS[@]}" ${VM_USER}@"$TAP_GUEST_IP"
     else
         local escaped_cmd="${cmd//\'/\'\\\'\'}"
-        ssh -tt "${SSH_OPTS[@]}" ${VM_USER}@"$TAP_GUEST_IP" -- "bash -lc '${escaped_cmd}'"
+        ssh "${SSH_OPTS[@]}" ${VM_USER}@"$TAP_GUEST_IP" -- "bash -lc '${escaped_cmd}'"
     fi
 }
 
