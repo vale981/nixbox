@@ -14,7 +14,7 @@ This would have duplicated logic that already exists in the host's DNS stack.
 Forward **all** dnsmasq queries to `127.0.0.53` — the systemd-resolved stub resolver:
 
 ```
-dnsmasq --listen-address=172.16.0.1 --server=127.0.0.53
+dnsmasq --listen-address=$TAP_HOST_IP --server=127.0.0.53
 ```
 
 The host's systemd-resolved already handles split-DNS routing. The VPN client (OpenConnect) auto-configures systemd-resolved with per-link DNS servers and search domains. dnsmasq simply delegates to it.

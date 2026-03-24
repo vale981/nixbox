@@ -9,16 +9,87 @@ if [ -d "${_self_dir}/../share/nixbox" ]; then
 else
     NIXBOX_SRC="$(cd "${_self_dir}/.." && pwd)"
 fi
-ACTIVE_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/nixbox-active"
+NIXBOX_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/nixbox"
+SLOTS_DIR="$NIXBOX_RUNTIME_DIR/slots"
+BYDIR_DIR="$NIXBOX_RUNTIME_DIR/by-dir"
 NIXBOX_DIR=""
 
-TAP_DEV="vmtap0"
-TAP_HOST_IP="172.16.0.1"
-TAP_GUEST_IP="172.16.0.2"
-TAP_CIDR="172.16.0.1/30"
+# Network variables — set by derive_network() per VM slot
+TAP_DEV="" TAP_HOST_IP="" TAP_GUEST_IP="" TAP_SUBNET="" TAP_CIDR="" TAP_MAC="" NFT_TABLE="" VSOCK_CID=""
+
+derive_network() {
+    local slot="$1" name="$2"
+    local base=$((slot * 4))
+    TAP_DEV="vm${slot}"
+    TAP_HOST_IP="172.16.${base}.1"
+    TAP_GUEST_IP="172.16.${base}.2"
+    TAP_SUBNET="172.16.${base}.0/30"
+    TAP_CIDR="172.16.${base}.1/30"
+    TAP_MAC=$(printf '02:00:00:00:00:%02x' $((slot + 1)))
+    NFT_TABLE="nixbox_${name}"
+    VSOCK_CID=$((3 + slot))
+}
+
 SSH_KEY=""
 SSH_OPTS=()
 VM_USER="$(whoami)"
+VM_SLOT=""
+
+allocate_slot() {
+    local nixbox_dir="$1"
+    mkdir -p "$SLOTS_DIR" "$BYDIR_DIR"
+    local dir_hash
+    dir_hash=$(echo -n "$nixbox_dir" | md5sum | cut -d' ' -f1)
+
+    # Already have a slot?
+    if [ -f "$BYDIR_DIR/$dir_hash" ]; then
+        local existing_slot
+        existing_slot=$(cat "$BYDIR_DIR/$dir_hash")
+        if [ -f "$SLOTS_DIR/$existing_slot" ]; then
+            echo "$existing_slot"; return 0
+        fi
+    fi
+
+    # Find first available slot
+    local slot
+    for slot in $(seq 0 63); do
+        if [ ! -f "$SLOTS_DIR/$slot" ]; then
+            echo "$nixbox_dir" > "$SLOTS_DIR/$slot"
+            echo "$slot" > "$BYDIR_DIR/$dir_hash"
+            echo "$slot"; return 0
+        fi
+        # Stale check
+        local slot_dir
+        slot_dir=$(cat "$SLOTS_DIR/$slot")
+        if [ ! -f "$slot_dir/state/pid" ] || ! kill -0 "$(cat "$slot_dir/state/pid")" 2>/dev/null; then
+            local old_hash
+            old_hash=$(echo -n "$slot_dir" | md5sum | cut -d' ' -f1)
+            rm -f "$BYDIR_DIR/$old_hash"
+            echo "$nixbox_dir" > "$SLOTS_DIR/$slot"
+            echo "$slot" > "$BYDIR_DIR/$dir_hash"
+            echo "$slot"; return 0
+        fi
+    done
+    die "No available VM slots (max 64 concurrent VMs)"
+}
+
+release_slot() {
+    local nixbox_dir="$1"
+    local dir_hash
+    dir_hash=$(echo -n "$nixbox_dir" | md5sum | cut -d' ' -f1)
+    if [ -f "$BYDIR_DIR/$dir_hash" ]; then
+        local slot
+        slot=$(cat "$BYDIR_DIR/$dir_hash")
+        rm -f "$SLOTS_DIR/$slot" "$BYDIR_DIR/$dir_hash"
+    fi
+}
+
+get_slot() {
+    local nixbox_dir="$1"
+    local dir_hash
+    dir_hash=$(echo -n "$nixbox_dir" | md5sum | cut -d' ' -f1)
+    [ -f "$BYDIR_DIR/$dir_hash" ] && cat "$BYDIR_DIR/$dir_hash" || echo ""
+}
 
 die() { printf '\r%s\n' "ERROR: $*" >&2; exit 1; }
 log() { printf '\r%s\n' "$*"; }
@@ -51,13 +122,38 @@ init_nixbox_dir() {
 init_nixbox_dir_or_active() {
     if NIXBOX_DIR="$(find_nixbox_dir 2>/dev/null)"; then
         :
-    elif [ -f "$ACTIVE_FILE" ]; then
-        NIXBOX_DIR="$(cat "$ACTIVE_FILE")"
     else
-        die "No .nixbox/ found and no active VM."
+        local running=()
+        mkdir -p "$SLOTS_DIR"
+        for slot_file in "$SLOTS_DIR"/*; do
+            [ -f "$slot_file" ] || continue
+            local dir
+            dir=$(cat "$slot_file")
+            [ -f "$dir/state/pid" ] && kill -0 "$(cat "$dir/state/pid")" 2>/dev/null && running+=("$dir")
+        done
+        if [ ${#running[@]} -eq 1 ]; then
+            NIXBOX_DIR="${running[0]}"
+        elif [ ${#running[@]} -gt 1 ]; then
+            echo "Multiple VMs running. Run from a project directory, or use 'nixbox status':" >&2
+            for dir in "${running[@]}"; do
+                local name
+                name=$(cat "$dir/state/name" 2>/dev/null || basename "$(dirname "$dir")")
+                echo "  - $name ($(dirname "$dir"))" >&2
+            done
+            exit 1
+        else
+            die "No .nixbox/ found and no active VM."
+        fi
     fi
     SSH_KEY="$NIXBOX_DIR/ssh/vm_key"
     SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$SSH_KEY")
+
+    # Derive network from persisted slot
+    local vm_slot
+    vm_slot=$(cat "$NIXBOX_DIR/state/slot" 2>/dev/null || echo "0")
+    local name
+    name=$(cat "$NIXBOX_DIR/state/name" 2>/dev/null || basename "$(dirname "$NIXBOX_DIR")")
+    derive_network "$vm_slot" "$name"
 }
 
 resolve_config() {
@@ -88,22 +184,6 @@ get_project_name() {
         cat "$NIXBOX_DIR/state/name"
     else
         basename "$(dirname "$NIXBOX_DIR")"
-    fi
-}
-
-check_no_conflicting_vm() {
-    if [ -f "$ACTIVE_FILE" ]; then
-        local active_nixbox_dir
-        active_nixbox_dir=$(cat "$ACTIVE_FILE")
-        if [ "$active_nixbox_dir" != "$NIXBOX_DIR" ]; then
-            local pid_file="${active_nixbox_dir}/state/pid"
-            if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-                local active_name
-                active_name=$(basename "$(dirname "$active_nixbox_dir")")
-                die "VM for '${active_name}' ($(dirname "$active_nixbox_dir")) is running. Run 'nixbox down' there first."
-            fi
-            rm -f "$ACTIVE_FILE"
-        fi
     fi
 }
 
@@ -144,6 +224,10 @@ do_destroy() {
         return 0
     fi
 
+    local vm_slot
+    vm_slot=$(cat "$state_dir/slot" 2>/dev/null || echo "0")
+    derive_network "$vm_slot" "$name"
+
     if [ -f "$state_dir/pid" ]; then
         local pid
         pid=$(cat "$state_dir/pid")
@@ -177,10 +261,10 @@ do_destroy() {
         kill "$(cat "$pidfile")" 2>/dev/null || true
     done
 
-    sudo nft delete table inet nixbox 2>/dev/null || true
+    sudo nft delete table inet $NFT_TABLE 2>/dev/null || true
     if sudo iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-        sudo iptables -D DOCKER-USER -i vmtap0 -j ACCEPT 2>/dev/null || true
-        sudo iptables -D DOCKER-USER -o vmtap0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+        sudo iptables -D DOCKER-USER -i $TAP_DEV -j ACCEPT 2>/dev/null || true
+        sudo iptables -D DOCKER-USER -o $TAP_DEV -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
     fi
 
     if [ -f "$state_dir/dnsmasq.pid" ]; then
@@ -238,6 +322,7 @@ do_create() {
     trap cleanup_on_failure EXIT
 
     mkdir -p "$state_dir" "$run_dir"
+    echo "$VM_SLOT" > "$state_dir/slot"
 
     # --- Generate env disk ---
     log "==> Generating env disk..."
@@ -265,17 +350,30 @@ do_create() {
     case "$network" in
         off)
             log_sub "Mode: strict (no forwarding)"
-            sudo nft -f - <<'NFTEOF'
-table inet nixbox {
+            sudo nft -f - <<NFTEOF
+table inet $NFT_TABLE {
+    chain input {
+        type filter hook input priority 0;
+        iifname "$TAP_DEV" udp dport 67 accept
+    }
     chain forward {
         type filter hook forward priority 0; policy drop;
     }
     chain postrouting {
         type nat hook postrouting priority 100;
-        oifname != "vmtap0" ip saddr 172.16.0.0/30 masquerade
+        oifname != "$TAP_DEV" ip saddr $TAP_SUBNET masquerade
     }
 }
 NFTEOF
+            sudo dnsmasq --port=0 --bind-interfaces \
+                "--listen-address=$TAP_HOST_IP" \
+                --except-interface=lo \
+                --keep-in-foreground \
+                "--dhcp-range=$TAP_GUEST_IP,$TAP_GUEST_IP,infinite" \
+                "--dhcp-option=option:router,$TAP_HOST_IP" \
+                "--dhcp-option=option:dns-server,$TAP_HOST_IP" \
+                "--dhcp-host=$TAP_MAC,$TAP_GUEST_IP" &
+            echo $! > "$state_dir/dnsmasq.pid"
             ;;
         filtered)
             log_sub "Mode: filtered (domain allowlist)"
@@ -284,6 +382,10 @@ NFTEOF
                 "--listen-address=$TAP_HOST_IP"
                 --except-interface=lo
                 --keep-in-foreground
+                "--dhcp-range=$TAP_GUEST_IP,$TAP_GUEST_IP,infinite"
+                "--dhcp-option=option:router,$TAP_HOST_IP"
+                "--dhcp-option=option:dns-server,$TAP_HOST_IP"
+                "--dhcp-host=$TAP_MAC,$TAP_GUEST_IP"
             )
             while IFS= read -r domain; do
                 [ -z "$domain" ] && continue
@@ -295,19 +397,23 @@ NFTEOF
 
             local ports_rule=""
             [ -n "$allowed_ports" ] && \
-                ports_rule="iifname \"vmtap0\" tcp dport { $allowed_ports } accept"
+                ports_rule="iifname \"$TAP_DEV\" tcp dport { $allowed_ports } accept"
             sudo nft -f - <<NFTEOF
-table inet nixbox {
+table inet $NFT_TABLE {
+    chain input {
+        type filter hook input priority 0;
+        iifname "$TAP_DEV" udp dport 67 accept
+    }
     chain forward {
         type filter hook forward priority 0; policy drop;
         ct state established,related accept
-        iifname "vmtap0" udp dport 53 ip daddr $TAP_HOST_IP accept
-        iifname "vmtap0" tcp dport 53 ip daddr $TAP_HOST_IP accept
+        iifname "$TAP_DEV" udp dport 53 ip daddr $TAP_HOST_IP accept
+        iifname "$TAP_DEV" tcp dport 53 ip daddr $TAP_HOST_IP accept
         $ports_rule
     }
     chain postrouting {
         type nat hook postrouting priority 100;
-        oifname != "vmtap0" ip saddr 172.16.0.0/30 masquerade
+        oifname != "$TAP_DEV" ip saddr $TAP_SUBNET masquerade
     }
 }
 NFTEOF
@@ -315,8 +421,8 @@ NFTEOF
             # Docker's iptables FORWARD chain (policy DROP) intercepts forwarded
             # packets. Add ACCEPT rules in DOCKER-USER so they're not dropped.
             if sudo iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-                sudo iptables -I DOCKER-USER -i vmtap0 -j ACCEPT
-                sudo iptables -I DOCKER-USER -o vmtap0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+                sudo iptables -I DOCKER-USER -i $TAP_DEV -j ACCEPT
+                sudo iptables -I DOCKER-USER -o $TAP_DEV -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
             fi
             ;;
         open)
@@ -326,23 +432,27 @@ NFTEOF
                 "--listen-address=$TAP_HOST_IP" \
                 --except-interface=lo \
                 --keep-in-foreground \
-                --server=127.0.0.53 &
+                --server=127.0.0.53 \
+                "--dhcp-range=$TAP_GUEST_IP,$TAP_GUEST_IP,infinite" \
+                "--dhcp-option=option:router,$TAP_HOST_IP" \
+                "--dhcp-option=option:dns-server,$TAP_HOST_IP" \
+                "--dhcp-host=$TAP_MAC,$TAP_GUEST_IP" &
             echo $! > "$state_dir/dnsmasq.pid"
-            sudo nft -f - <<'NFTEOF'
-table inet nixbox {
+            sudo nft -f - <<NFTEOF
+table inet $NFT_TABLE {
     chain forward {
         type filter hook forward priority 0; policy accept;
     }
     chain postrouting {
         type nat hook postrouting priority 100;
-        oifname != "vmtap0" ip saddr 172.16.0.0/30 masquerade
+        oifname != "$TAP_DEV" ip saddr $TAP_SUBNET masquerade
     }
 }
 NFTEOF
             sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
             if sudo iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-                sudo iptables -I DOCKER-USER -i vmtap0 -j ACCEPT
-                sudo iptables -I DOCKER-USER -o vmtap0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+                sudo iptables -I DOCKER-USER -i $TAP_DEV -j ACCEPT
+                sudo iptables -I DOCKER-USER -o $TAP_DEV -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
             fi
             ;;
         *)
@@ -389,6 +499,9 @@ NFTEOF
     sed -i "s/--memory size=[0-9]*M/--memory size=${mem_mb}M/" "$run_dir/microvm-run"
     sed -i "s/num_queues=512/num_queues=$((vcpus * 2))/" "$run_dir/microvm-run"
     sed -i "s/num_queues=256/num_queues=$((vcpus * 2))/" "$run_dir/microvm-run"
+    sed -i "s/tap=vmtap0/tap=$TAP_DEV/" "$run_dir/microvm-run"
+    sed -i "s/mac=02:00:00:00:00:01/mac=$TAP_MAC/" "$run_dir/microvm-run"
+    sed -i "s/--vsock cid=3/--vsock cid=$VSOCK_CID/" "$run_dir/microvm-run"
 
     cd "$run_dir"
     ulimit -n 65536
@@ -626,42 +739,35 @@ do_unmount() {
 }
 
 do_list() {
-    local nixbox_dir=""
-    if [ -f "$ACTIVE_FILE" ]; then
-        nixbox_dir="$(cat "$ACTIVE_FILE")"
-    elif nixbox_dir="$(find_nixbox_dir 2>/dev/null)"; then
-        :
-    fi
-
-    if [ -z "$nixbox_dir" ] || [ ! -d "$nixbox_dir/state" ] || [ ! -f "$nixbox_dir/state/pid" ]; then
-        echo "No VMs found."
-        return 0
-    fi
-
-    local state_dir="$nixbox_dir/state"
-
-    printf "%-15s %-10s %-12s %-10s\n" "NAME" "PID" "UPTIME" "STATUS"
-    printf "%-15s %-10s %-12s %-10s\n" "----" "---" "------" "------"
-
-    local name pid start status uptime
-    name=$(cat "$state_dir/name" 2>/dev/null || basename "$(dirname "$nixbox_dir")")
-    pid=$(cat "$state_dir/pid" 2>/dev/null || echo "-")
-    start=$(cat "$state_dir/start_time" 2>/dev/null || echo "0")
-
-    if [ "$pid" != "-" ] && kill -0 "$pid" 2>/dev/null; then
-        status="running"
-        local now uptime_secs hours mins
+    local found=0
+    printf "%-15s %-10s %-12s %-10s %-6s\n" "NAME" "PID" "UPTIME" "STATUS" "SLOT"
+    printf "%-15s %-10s %-12s %-10s %-6s\n" "----" "---" "------" "------" "----"
+    mkdir -p "$SLOTS_DIR"
+    for slot_file in "$SLOTS_DIR"/*; do
+        [ -f "$slot_file" ] || continue
+        local nixbox_dir slot state_dir name pid start status uptime
+        nixbox_dir=$(cat "$slot_file")
+        slot=$(basename "$slot_file")
+        state_dir="$nixbox_dir/state"
+        [ -d "$state_dir" ] || continue
+        name=$(cat "$state_dir/name" 2>/dev/null || basename "$(dirname "$nixbox_dir")")
+        pid=$(cat "$state_dir/pid" 2>/dev/null || echo "-")
+        start=$(cat "$state_dir/start_time" 2>/dev/null || echo "0")
+        if [ "$pid" != "-" ] && kill -0 "$pid" 2>/dev/null; then
+            status="running"
+        else
+            status="dead"
+        fi
+        local now elapsed hours mins
         now=$(date +%s)
-        uptime_secs=$((now - start))
-        hours=$((uptime_secs / 3600))
-        mins=$(( (uptime_secs % 3600) / 60 ))
+        elapsed=$((now - start))
+        hours=$((elapsed / 3600))
+        mins=$(( (elapsed % 3600) / 60 ))
         uptime="${hours}h${mins}m"
-    else
-        status="dead"
-        uptime="-"
-    fi
-
-    printf "%-15s %-10s %-12s %-10s\n" "$name" "$pid" "$uptime" "$status"
+        printf "%-15s %-10s %-12s %-10s %-6s\n" "$name" "$pid" "$uptime" "$status" "$slot"
+        found=1
+    done
+    [ "$found" -eq 0 ] && echo "No VMs running."
 }
 
 # ---------------------------------------------------------------------------
@@ -779,14 +885,13 @@ cmd_up() {
         echo "$CONFIG_JSON" | jq -r '.network.domains[]' > "$domains_file"
     fi
 
-    check_no_conflicting_vm
+    VM_SLOT=$(allocate_slot "$NIXBOX_DIR")
+    derive_network "$VM_SLOT" "$project_name"
 
     local vcpus mem_mb
     vcpus="$(jq_field '.resources.vcpus')"
     mem_mb="$(jq_field '.resources.memoryMB')"
     log "==> Starting VM '$project_name' [network=$network, vcpus=$vcpus, mem=${mem_mb}MB]"
-
-    echo "$NIXBOX_DIR" > "$ACTIVE_FILE"
 
     run_hooks "pre-up"
     do_create "$project_name" "$mounts_json" "$domains_file" "$project_dir"
@@ -800,9 +905,14 @@ cmd_down() {
     resolve_config "$config_path" 2>/dev/null || true
     local project_name
     project_name="$(get_project_name)"
+
+    local vm_slot
+    vm_slot=$(cat "$NIXBOX_DIR/state/slot" 2>/dev/null || echo "0")
+    derive_network "$vm_slot" "$project_name"
+
     run_hooks "pre-down"
     do_destroy "$project_name"
-    rm -f "$ACTIVE_FILE"
+    release_slot "$NIXBOX_DIR"
     run_hooks "post-down"
 }
 
@@ -839,10 +949,6 @@ cmd_unmount() {
 
 cmd_status() {
     do_list
-    if [ -f "$ACTIVE_FILE" ]; then
-        echo ""
-        echo "Active workspace: $(dirname "$(cat "$ACTIVE_FILE")")"
-    fi
 }
 
 cmd_config() {

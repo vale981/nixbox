@@ -11,7 +11,7 @@ This looks like a security configuration that should be "fixed" by removing `--u
 
 ## Decision
 
-Run dnsmasq with implicit root privileges (no `--user=` override to drop privileges). dnsmasq is already started via `sudo` and only listens on the TAP interface (`172.16.0.1`), not on external interfaces or localhost.
+Run dnsmasq with implicit root privileges (no `--user=` override to drop privileges). dnsmasq is already started via `sudo` and only listens on the per-slot TAP interface (e.g., `172.16.0.1` for slot 0), not on external interfaces or localhost.
 
 The TAP interface is only reachable from the local VM — the attack surface is limited to a process the user explicitly started.
 

@@ -5,7 +5,7 @@
 
 ## Problem
 
-The default `ip tuntap add dev vmtap0 mode tap` creates a single-queue TAP device. cloud-hypervisor's virtio-net implementation expects multi-queue support. With a single-queue TAP, networking *mostly works* but drops packets under load — the failure mode is subtle and hard to reproduce, manifesting as intermittent connection resets or stalled downloads.
+The default `ip tuntap add dev $TAP_DEV mode tap` creates a single-queue TAP device. cloud-hypervisor's virtio-net implementation expects multi-queue support. With a single-queue TAP, networking *mostly works* but drops packets under load — the failure mode is subtle and hard to reproduce, manifesting as intermittent connection resets or stalled downloads.
 
 Most TAP setup examples online omit the `multi_queue` flag, making this easy to miss.
 
@@ -14,7 +14,7 @@ Most TAP setup examples online omit the `multi_queue` flag, making this easy to 
 Create the TAP device with multi-queue enabled:
 
 ```bash
-sudo ip tuntap add dev vmtap0 mode tap multi_queue user "$(whoami)"
+sudo ip tuntap add dev $TAP_DEV mode tap multi_queue user "$(whoami)"
 ```
 
 ## Consequences

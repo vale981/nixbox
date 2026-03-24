@@ -2,7 +2,7 @@
 
 Cloud-hypervisor microVM sandbox for running AI agents (eg: Claude Code with `--dangerously-skip-permissions`) in full isolation. Host protected by KVM boundary + egress filtering. Directories shared via virtiofs bind mounts.
 
-Only one VM runs at a time. Mount your entire workspace (e.g. `~/workspace`) rather than a single project — this lets you switch between projects inside the VM without restarting it.
+Multiple VMs can run concurrently (up to 64), each with isolated slot-based networking. Mount your entire workspace (e.g. `~/workspace`) rather than a single project — this lets you switch between projects inside the VM without restarting it.
 
 ## Philosophy
 
@@ -243,8 +243,7 @@ The JDK is specified separately via `nix.packages` so you control the version. S
 
 ## Known limitations
 
-- **Single VM at a time** — `nixbox up` errors if another VM is already running. `nixbox down` first. Mount your whole workspace to avoid restarting when switching projects.
-- **TAP/IP range hardcoded** — `172.16.0.0/30`. Multi-VM requires per-VM IP allocation.
+- **Concurrent VMs** — up to 64 concurrent VMs supported, each with per-VM network isolation via slot-based IP allocation.
 - **virtiofs + `O_TMPFILE`** — virtiofs does not support `O_TMPFILE`. Tools that hit this (e.g. Node.js/Claude Code) need tmpfs overlays on affected dirs — the `claude-code` plugin handles this automatically.
 
 ## Acknowledgments

@@ -157,20 +157,7 @@
                 hostName = "nixbox";
                 firewall.enable = false;
                 useDHCP = false;
-                interfaces.eth0 = {
-                  useDHCP = false;
-                  ipv4.addresses = [
-                    {
-                      address = "172.16.0.2";
-                      prefixLength = 30;
-                    }
-                  ];
-                };
-                defaultGateway = {
-                  address = "172.16.0.1";
-                  interface = "eth0";
-                };
-                nameservers = [ "172.16.0.1" ];
+                interfaces.eth0.useDHCP = true;
               };
 
               # --- systemd: Inject environment from host via hot-plugged disk ---

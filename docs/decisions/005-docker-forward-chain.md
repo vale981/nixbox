@@ -5,7 +5,7 @@
 
 ## Problem
 
-On hosts running Docker, the iptables FORWARD chain has `policy DROP`. The kernel evaluates iptables **before** nftables on the FORWARD hook. This means even correct nftables ACCEPT rules for the TAP interface (`vmtap0`) are never reached — Docker's iptables drops the packets first.
+On hosts running Docker, the iptables FORWARD chain has `policy DROP`. The kernel evaluates iptables **before** nftables on the FORWARD hook. This means even correct nftables ACCEPT rules for the per-slot TAP interface (e.g., `vm0`) are never reached — Docker's iptables drops the packets first.
 
 The failure mode is deceptive: `nft list ruleset` shows correct rules, `iptables -L FORWARD` shows the DROP policy, but the connection between them isn't obvious. VM networking silently fails with no error messages.
 
@@ -14,8 +14,8 @@ The failure mode is deceptive: `nft list ruleset` shows correct rules, `iptables
 Before applying nftables rules, check if the `DOCKER-USER` iptables chain exists. If it does, insert ACCEPT rules into it for the TAP interface:
 
 ```bash
-sudo iptables -I DOCKER-USER -i vmtap0 -j ACCEPT
-sudo iptables -I DOCKER-USER -o vmtap0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -I DOCKER-USER -i $TAP_DEV -j ACCEPT
+sudo iptables -I DOCKER-USER -o $TAP_DEV -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ```
 
 Cleanup (`nixbox down`) removes both nftables rules AND the iptables DOCKER-USER rules.
