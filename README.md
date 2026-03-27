@@ -95,6 +95,10 @@ Three modes controlled by `network.mode`:
 
 Base domains (`nixos.org`) are always included. Plugin domains are merged automatically. Your `network.domains` adds on top of both.
 
+## SSH Identity
+
+Each VM has a stable SSH key pair at `.nixbox/ssh/vm_key{,.pub}`, generated once on first `nixbox up`. The private key is injected into `~/.ssh/id_ed25519` inside the guest. Register the public key on any service the VM needs to reach — it persists across restarts.
+
 ## Credentials
 
 Secrets are passed via the `env` attrset. Use `builtins.getEnv` to read from host environment so the file stays safe to commit:
