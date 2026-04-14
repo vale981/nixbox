@@ -27,7 +27,7 @@ nix profile install github:razvanz/nixbox
 
 # Or clone + install locally
 git clone https://github.com/razvanz/nixbox.git
-cd nixcage
+cd nixbox
 nix profile install .
 ```
 
