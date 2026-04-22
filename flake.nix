@@ -138,10 +138,28 @@
                     ]
                     ++ extraLibraries;
                 };
+
+              # --- Kernel file limits ---
+              security.pam.loginLimits = [
+                {
+                  domain = "*";
+                  type = "soft";
+                  item = "nofile";
+                  value = "1048576";
+                }
+                {
+                  domain = "*";
+                  type = "hard";
+                  item = "nofile";
+                  value = "1048576";
+                }
+              ];
+
+              boot.kernel.sysctl = {
+                "fs.file-max" = 9223372036854775807;
               };
 
               # --- Environment ---
-
               environment.shellInit = ''
                 [ -f "$HOME/.env" ] && set -a && . "$HOME/.env" && set +a
               '';
@@ -218,7 +236,16 @@
                   VM_HOME=/home/${vmUser}
 
                   # Environment file
-                  [ -f /mnt/env-disk/env ] && cp /mnt/env-disk/env "$VM_HOME/.env"
+                  if [ -f /mnt/env-disk/env ]; then
+                    cp /mnt/env-disk/env "$VM_HOME/.env"
+                    # Apply host FD limits to the guest if provided
+                    HOST_MAX_FD=$(grep "^HOST_MAX_FD=" /mnt/env-disk/env | cut -d= -f2 || true)
+                    if [ -z "$HOST_MAX_FD" ]; then
+                      # Sane fallback if not provided by nixbox binary
+                      HOST_MAX_FD=1048576
+                    fi
+                    prlimit --pid 1 --nofile="$HOST_MAX_FD:$HOST_MAX_FD" || true
+                  fi
 
                   chown -R ${vmUser}:users "$VM_HOME"
                   umount /mnt/env-disk; rmdir /mnt/env-disk

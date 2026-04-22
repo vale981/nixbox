@@ -151,9 +151,12 @@ do_create() {
     # Environment file
     local env_json
     env_json=$(echo "$CONFIG_JSON" | jq -r '.env // {}')
-    if [ "$(echo "$env_json" | jq 'length')" -gt 0 ]; then
-        echo "$env_json" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > "$env_dir/env"
-    fi
+    local host_max_fd
+    host_max_fd=$(ulimit -Hn)
+    {
+        [ "$(echo "$env_json" | jq 'length')" -gt 0 ] && echo "$env_json" | jq -r 'to_entries[] | "\(.key)=\(.value)"'
+        echo "HOST_MAX_FD=$host_max_fd"
+    } > "$env_dir/env"
 
     mke2fs -F -t ext4 -d "$env_dir" -L env "$env_img" 32M 2>/dev/null
     rm -rf "$env_dir"
@@ -310,13 +313,15 @@ NFTEOF
             ;;
     esac
 
-    # Raise FD limit before launching virtiofsd and cloud-hypervisor
-    ulimit -n 65536
+    # Raise FD limit to host maximum before launching virtiofsd and cloud-hypervisor
+    local host_max_fd
+    host_max_fd=$(ulimit -Hn)
+    ulimit -n "$host_max_fd" || log "Warning: failed to set FD limit to $host_max_fd (current: $(ulimit -n))"
 
     # --- Start virtiofsd for nix-store share (required by microvm config) ---
     log "==> Starting virtiofsd for nix-store..."
     local nix_store_sock="$run_dir/nixbox-virtiofs-nix-store.sock"
-    virtiofsd --socket-path="$nix_store_sock" --shared-dir="/nix/store" --sandbox=none --translate-uid="map:1000:$(id -u):1" --translate-gid="map:100:$(id -g):1" --cache=auto 2>"$run_dir/virtiofsd-nix-store.log" &
+    virtiofsd  --socket-path="$nix_store_sock" --shared-dir="/nix/store" --sandbox=none --translate-uid="map:1000:$(id -u):1" --translate-gid="map:100:$(id -g):1" --cache=auto 2>"$run_dir/virtiofsd-nix-store.log" &
     echo "$!" > "$state_dir/virtiofsd_nix_store_pid"
     for _ in $(seq 1 10); do [ -S "$nix_store_sock" ] && break; sleep 0.2; done
     [ -S "$nix_store_sock" ] || die "virtiofsd socket for nix-store did not appear"
@@ -542,7 +547,9 @@ do_mount() {
     done
 
     local virtiofs_sock="$run_dir/virtiofs-${mount_idx}.sock"
-    ulimit -n 65536
+    local host_max_fd
+    host_max_fd=$(ulimit -Hn)
+    ulimit -n "$host_max_fd" || true
     virtiofsd \
         --socket-path="$virtiofs_sock" \
         --shared-dir="$MOUNT_SOURCE" \

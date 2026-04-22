@@ -63,6 +63,15 @@ for pidfile in .nixbox/state/virtiofsd_*_pid; do
     fi
 done
 
+echo "==> Verifying guest FD limits..."
+guest_max_fds=$("$NIXBOX_CLI" run "ulimit -n")
+if [ "$guest_max_fds" -ge 65536 ]; then
+    echo "  ok: guest has $guest_max_fds max FDs"
+else
+    echo "  FAIL: guest has $guest_max_fds max FDs, expected >= 65536"
+    exit 1
+fi
+
 echo "==> Testing SSH command execution..."
 output=$("$NIXBOX_CLI" run "echo hello-from-vm")
 if [ "$output" = "hello-from-vm" ]; then
