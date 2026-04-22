@@ -120,16 +120,24 @@
               # --- Dynamic linker for generic Linux binaries ---
               # Many dev tools (scala-cli-fetched scalafmt, Node native deps, etc.)
               # ship prebuilt glibc binaries that need /lib64/ld-linux-x86-64.so.2.
-              programs.nix-ld = {
-                enable = true;
-                libraries = with pkgs; [
-                  stdenv.cc.cc.lib
-                  zlib
-                  openssl
-                  curl
-                  icu
-                  libxcrypt
-                ];
+              programs.nix-ld =
+                let
+                  extraLibraries = map (name: pkgs.${name}) ((projectConfig.nix or { }).libraries or [ ]);
+                in
+                {
+                  enable = true;
+                  libraries =
+                    with pkgs;
+                    [
+                      stdenv.cc.cc.lib
+                      zlib
+                      openssl
+                      curl
+                      icu
+                      libxcrypt
+                    ]
+                    ++ extraLibraries;
+                };
               };
 
               # --- Environment ---
